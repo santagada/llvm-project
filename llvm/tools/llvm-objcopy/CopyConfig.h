@@ -120,6 +120,7 @@ struct CopyConfig {
   std::function<uint64_t(uint64_t)> EntryExpr;
 
   // Boolean options
+  bool AddGHashes = false;
   bool DeterministicArchives = true;
   bool ExtractDWO = false;
   bool KeepFileSymbols = false;
