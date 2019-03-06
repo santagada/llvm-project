@@ -542,6 +542,7 @@ Expected<DriverConfig> parseObjcopyOptions(ArrayRef<const char *> ArgsArr) {
     // finalize the CRC32 value.
     Config.GnuDebugLinkCRC32 = ~CRC.getCRC();
   }
+  Config.AddGHashes = InputArgs.hasArg(OBJCOPY_add_ghashes);
   Config.BuildIdLinkDir = InputArgs.getLastArgValue(OBJCOPY_build_id_link_dir);
   if (InputArgs.hasArg(OBJCOPY_build_id_link_input))
     Config.BuildIdLinkInput =

@@ -161,6 +161,7 @@ struct CopyConfig {
 
   // Boolean options
   bool AllowBrokenLinks = false;
+  bool AddGHashes = false;
   bool DeterministicArchives = true;
   bool ExtractDWO = false;
   bool ExtractMainPartition = false;
