@@ -76,15 +76,11 @@ enum class GlobalTypeHashAlg : uint16_t {
 /// equality comparison of a full record.
 struct GloballyHashedType {
   GloballyHashedType() = default;
-  GloballyHashedType(StringRef H)
-      : GloballyHashedType(ArrayRef<uint8_t>(H.bytes_begin(), H.bytes_end())) {}
-  GloballyHashedType(ArrayRef<uint8_t> H) {
-    assert(H.size() == 8);
-    ::memcpy(Hash.data(), H.data(), 8);
+  GloballyHashedType(uint64_t H): Hash(H) {
   }
-  std::array<uint8_t, 8> Hash;
+  uint64_t Hash;
 
-  bool empty() const { return *(const uint64_t*)Hash.data() == 0; }
+  bool empty() const { return Hash == 0; }
 
   /// Given a sequence of bytes representing a record, compute a global hash for
   /// this record.  Due to the nature of global hashes incorporating the hashes
@@ -201,7 +197,7 @@ template <> struct DenseMapInfo<codeview::GloballyHashedType> {
   static codeview::GloballyHashedType getTombstoneKey() { return Tombstone; }
 
   static unsigned getHashValue(codeview::GloballyHashedType Val) {
-    return *reinterpret_cast<const unsigned *>(Val.Hash.data());
+    return Val.Hash;
   }
 
   static bool isEqual(codeview::GloballyHashedType LHS,
@@ -222,9 +218,7 @@ template <> struct format_provider<codeview::GloballyHashedType> {
 public:
   static void format(const codeview::GloballyHashedType &V,
                      llvm::raw_ostream &Stream, StringRef Style) {
-    for (uint8_t B : V.Hash) {
-      write_hex(Stream, B, HexPrintStyle::Upper, 2);
-    }
+	 write_hex(Stream, V.Hash, HexPrintStyle::Upper, 16);
   }
 };
 
