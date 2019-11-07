@@ -720,10 +720,7 @@ void CodeViewDebug::emitTypeGlobalHashes() {
       OS.AddComment(Comment);
       ++TI;
     }
-    assert(GHR.Hash.size() == 8);
-    StringRef S(reinterpret_cast<const char *>(GHR.Hash.data()),
-                GHR.Hash.size());
-    OS.EmitBinaryData(S);
+	OS.EmitIntValue(GHR.Hash, 8);
   }
 }
 

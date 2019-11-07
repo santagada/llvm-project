@@ -9,7 +9,12 @@
 #include "llvm/DebugInfo/CodeView/TypeHashing.h"
 
 #include "llvm/DebugInfo/CodeView/TypeIndexDiscovery.h"
-#include "llvm/Support/SHA1.h"
+
+#define XXH_STATIC_LINKING_ONLY
+#define XXH_INLINE_ALL
+#include "llvm/DebugInfo/CodeView/xxHash.h"
+#undef XXH_INLINE_ALL
+#undef XXH_STATIC_LINKING_ONLY 
 
 using namespace llvm;
 using namespace llvm::codeview;
@@ -17,10 +22,8 @@ using namespace llvm::codeview;
 LocallyHashedType DenseMapInfo<LocallyHashedType>::Empty{0, {}};
 LocallyHashedType DenseMapInfo<LocallyHashedType>::Tombstone{hash_code(-1), {}};
 
-static std::array<uint8_t, 8> EmptyHash = {
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-static std::array<uint8_t, 8> TombstoneHash = {
-    {0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+static uint64_t EmptyHash = 0;
+static uint64_t TombstoneHash = 0xFF00000000000000;
 
 GloballyHashedType DenseMapInfo<GloballyHashedType>::Empty{EmptyHash};
 GloballyHashedType DenseMapInfo<GloballyHashedType>::Tombstone{TombstoneHash};
@@ -35,16 +38,26 @@ GloballyHashedType::hashType(ArrayRef<uint8_t> RecordData,
                              ArrayRef<GloballyHashedType> PreviousIds) {
   SmallVector<TiReference, 4> Refs;
   discoverTypeIndices(RecordData, Refs);
-  SHA1 S;
-  S.init();
+  XXH64_state_t state;
+  state.total_len = 0;
+  state.mem64[0] = 0;
+  state.mem64[1] = 0;
+  state.mem64[2] = 0;
+  state.mem64[3] = 0;
+  state.memsize = 0;
+  state.v1 = PRIME64_1 + PRIME64_2;
+  state.v2 = PRIME64_2;
+  state.v3 = 0;
+  state.v4 = - PRIME64_1;
   uint32_t Off = 0;
-  S.update(RecordData.take_front(sizeof(RecordPrefix)));
+  ArrayRef<uint8_t> prefix = RecordData.take_front(sizeof(RecordPrefix));
+  XXH64_update(&state, prefix.data(), prefix.size());
   RecordData = RecordData.drop_front(sizeof(RecordPrefix));
   for (const auto &Ref : Refs) {
     // Hash any data that comes before this TiRef.
     uint32_t PreLen = Ref.Offset - Off;
     ArrayRef<uint8_t> PreData = RecordData.slice(Off, PreLen);
-    S.update(PreData);
+    XXH64_update(&state, PreData.data(), PreData.size());
     auto Prev = (Ref.Kind == TiRefKind::IndexRef) ? PreviousIds : PreviousTypes;
 
     auto RefData = RecordData.slice(Ref.Offset, Ref.Count * sizeof(TypeIndex));
@@ -53,10 +66,10 @@ GloballyHashedType::hashType(ArrayRef<uint8_t> RecordData,
     ArrayRef<TypeIndex> Indices(
         reinterpret_cast<const TypeIndex *>(RefData.data()), Ref.Count);
     for (TypeIndex TI : Indices) {
-      ArrayRef<uint8_t> BytesToHash;
       if (TI.isSimple() || TI.isNoneType()) {
         const uint8_t *IndexBytes = reinterpret_cast<const uint8_t *>(&TI);
-        BytesToHash = makeArrayRef(IndexBytes, sizeof(TypeIndex));
+        ArrayRef<uint8_t> BytesToHash = makeArrayRef(IndexBytes, sizeof(TypeIndex));
+        XXH64_update(&state, BytesToHash.data(), BytesToHash.size());
       } else {
         if (TI.toArrayIndex() >= Prev.size() ||
             Prev[TI.toArrayIndex()].empty()) {
@@ -64,17 +77,16 @@ GloballyHashedType::hashType(ArrayRef<uint8_t> RecordData,
           // this record until all the other records are processed.
           return {};
         }
-        BytesToHash = Prev[TI.toArrayIndex()].Hash;
+        XXH64_update(&state, &Prev[TI.toArrayIndex()].Hash, 8);
       }
-      S.update(BytesToHash);
+      
     }
 
     Off = Ref.Offset + Ref.Count * sizeof(TypeIndex);
   }
 
   // Don't forget to add in any trailing bytes.
-  auto TrailingBytes = RecordData.drop_front(Off);
-  S.update(TrailingBytes);
-
-  return {S.final().take_back(8)};
+  ArrayRef<uint8_t> TrailingBytes = RecordData.drop_front(Off);
+  XXH64_update(&state, TrailingBytes.data(), TrailingBytes.size());
+  return { XXH64_digest(&state) };
 }

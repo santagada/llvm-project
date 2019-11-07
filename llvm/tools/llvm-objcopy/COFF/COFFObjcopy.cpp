@@ -129,7 +129,7 @@ ArrayRef<uint8_t> toDebugH(const std::vector<GloballyHashedType> hashes,
   cantFail(Writer.writeInteger(uint16_t(0)));
   cantFail(Writer.writeInteger(uint16_t(GlobalTypeHashAlg::SHA1_8)));
   for (const auto &H : hashes) {
-    cantFail(Writer.writeBytes(H.Hash));
+    cantFail(Writer.writeInteger(H.Hash));
   }
   assert(Writer.bytesRemaining() == 0);
   return Buffer;
