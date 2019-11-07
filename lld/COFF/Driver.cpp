@@ -388,6 +388,7 @@ void LinkerDriver::parseDirectives(InputFile *file) {
     case OPT_editandcontinue:
     case OPT_guardsym:
     case OPT_throwingnew:
+    case OPT_manifestdependency:
       break;
     default:
       error(arg->getSpelling() + " is not allowed in .drectve");
