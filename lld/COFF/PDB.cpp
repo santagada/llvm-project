@@ -57,7 +57,10 @@
 #include "llvm/Support/JamCRC.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ScopedPrinter.h"
+#include "lld/Common/Threads.h"
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
 using namespace lld;
 using namespace lld::coff;
@@ -65,6 +68,20 @@ using namespace llvm;
 using namespace llvm::codeview;
 
 using llvm::object::coff_section;
+
+namespace std {
+
+  template <>
+  struct hash<codeview::GUID>
+  {
+    std::size_t operator()(const codeview::GUID& k) const
+    {
+      return *(const std::size_t*) &k.Guid;
+    }
+  };
+
+}
+
 
 static ExitOnError exitOnErr;
 
@@ -85,11 +102,13 @@ class PDBLinker {
 
 public:
   PDBLinker(SymbolTable *symtab)
-      : alloc(), symtab(symtab), builder(alloc), tMerger(alloc) {
+      : alloc(), symbol_alloc(), symtab(symtab), builder(symbol_alloc), tMerger(alloc) {
     // This isn't strictly necessary, but link.exe usually puts an empty string
     // as the first "valid" string in the string table, so we do the same in
     // order to maintain as much byte-for-byte compatibility as possible.
     pdbStrTab.insert("");
+  typeServerIndexMappings.reserve(4096);
+  precompTypeIndexMappings.reserve(20);
   }
 
   /// Emit the basic PDB structure: initial streams, headers, etc.
@@ -107,7 +126,9 @@ public:
   /// Link CodeView from a single object file into the target (output) PDB.
   /// When a precompiled headers object is linked, its TPI map might be provided
   /// externally.
-  void addObjFile(ObjFile *file, CVIndexMap *externIndexMap = nullptr);
+  const CVIndexMap* addObjFile(ObjFile *file, CVIndexMap& externIndexMap);
+
+  void addObjFileSymbols(ObjFile* file, const CVIndexMap& indexMap);
 
   /// Produce a mapping from the type and item indices used in the object
   /// file to those in the destination PDB.
@@ -162,6 +183,9 @@ public:
 
 private:
   BumpPtrAllocator alloc;
+  BumpPtrAllocator symbol_alloc;
+
+  std::mutex symbol_lock;
 
   SymbolTable *symtab;
 
@@ -178,11 +202,11 @@ private:
   std::vector<pdb::SecMapEntry> sectionMap;
 
   /// Type index mappings of type server PDBs that we've loaded so far.
-  std::map<codeview::GUID, CVIndexMap> typeServerIndexMappings;
+  std::unordered_map<codeview::GUID, CVIndexMap> typeServerIndexMappings;
 
   /// Type index mappings of precompiled objects type map that we've loaded so
   /// far.
-  std::map<uint32_t, CVIndexMap> precompTypeIndexMappings;
+  std::unordered_map<uint32_t, CVIndexMap> precompTypeIndexMappings;
 
   // For statistics
   uint64_t globalSymbols = 0;
@@ -334,7 +358,7 @@ static void addTypeInfo(pdb::TpiStreamBuilder &tpiBuilder,
 
 Expected<const CVIndexMap &>
 PDBLinker::mergeDebugT(ObjFile *file, CVIndexMap *objectIndexMap) {
-  ScopedTimer t(typeMergingTimer);
+  //ScopedTimer t(typeMergingTimer);
 
   if (!file->debugTypesObj)
     return *objectIndexMap; // no Types stream
@@ -565,7 +589,7 @@ Expected<const CVIndexMap &> PDBLinker::aquirePrecompObj(ObjFile *file) {
         precompFileName.str(),
         make_error<pdb::PDBError>(pdb::pdb_error_code::external_cmdline_ref));
 
-  addObjFile(precompFile, &indexMap);
+  addObjFile(precompFile, indexMap);
 
   if (!precompFile->pchSignature)
     fatal(precompFile->getName() + " is not a precompiled headers object");
@@ -862,7 +886,7 @@ void PDBLinker::mergeSymbolRecords(ObjFile *file, const CVIndexMap &indexMap,
   MutableArrayRef<uint8_t> alignedSymbolMem;
   if (needsRealignment) {
     void *alignedData =
-        alloc.Allocate(totalRealignedSize, alignOf(CodeViewContainer::Pdb));
+        symbol_alloc.Allocate(totalRealignedSize, alignOf(CodeViewContainer::Pdb));
     alignedSymbolMem = makeMutableArrayRef(
         reinterpret_cast<uint8_t *>(alignedData), totalRealignedSize);
   }
@@ -944,9 +968,9 @@ void PDBLinker::mergeSymbolRecords(ObjFile *file, const CVIndexMap &indexMap,
 }
 
 // Allocate memory for a .debug$S / .debug$F section and relocate it.
-static ArrayRef<uint8_t> relocateDebugChunk(BumpPtrAllocator &alloc,
+static ArrayRef<uint8_t> relocateDebugChunk(BumpPtrAllocator &symbol_alloc,
                                             SectionChunk &debugChunk) {
-  uint8_t *buffer = alloc.Allocate<uint8_t>(debugChunk.getSize());
+  uint8_t *buffer = symbol_alloc.Allocate<uint8_t>(debugChunk.getSize());
   assert(debugChunk.getOutputSectionIdx() == 0 &&
          "debug sections should not be in output sections");
   debugChunk.writeTo(buffer);
@@ -996,7 +1020,7 @@ void DebugSHandler::handleDebugS(lld::coff::SectionChunk &debugS) {
   DebugSubsectionArray subsections;
 
   ArrayRef<uint8_t> relocatedDebugContents = SectionChunk::consumeDebugMagic(
-      relocateDebugChunk(linker.alloc, debugS), debugS.getSectionName());
+      relocateDebugChunk(linker.symbol_alloc, debugS), debugS.getSectionName());
 
   BinaryStreamReader reader(relocatedDebugContents, support::little);
   exitOnErr(reader.readArray(subsections, relocatedDebugContents.size()));
@@ -1166,35 +1190,37 @@ void DebugSHandler::finish() {
   file.moduleDBI->addDebugSubsection(std::move(newChecksums));
 }
 
-void PDBLinker::addObjFile(ObjFile *file, CVIndexMap *externIndexMap) {
+
+const CVIndexMap* PDBLinker::addObjFile(ObjFile *file, CVIndexMap& externIndexMap) {
   if (file->mergedIntoPDB)
-    return;
+    return nullptr;
   file->mergedIntoPDB = true;
 
   // Before we can process symbol substreams from .debug$S, we need to process
   // type information, file checksums, and the string table.  Add type info to
   // the PDB first, so that we can get the map from object file type and item
   // indices to PDB type and item indices.
-  CVIndexMap objectIndexMap;
   auto indexMapResult =
-      mergeDebugT(file, externIndexMap ? externIndexMap : &objectIndexMap);
+      mergeDebugT(file, &externIndexMap);
 
   // If the .debug$T sections fail to merge, assume there is no debug info.
   if (!indexMapResult) {
     if (!config->warnDebugInfoUnusable) {
       consumeError(indexMapResult.takeError());
-      return;
+      return nullptr;
     }
     warn("Cannot use debug info for '" + toString(file) + "' [LNK4099]\n" +
          ">>> failed to load reference " +
          StringRef(toString(indexMapResult.takeError())));
-    return;
+    return nullptr;
   }
 
-  ScopedTimer t(symbolMergingTimer);
+  return &indexMapResult.get();
+}
 
-  pdb::DbiStreamBuilder &dbiBuilder = builder.getDbiBuilder();
-  DebugSHandler dsh(*this, *file, *indexMapResult);
+void PDBLinker::addObjFileSymbols(ObjFile* file, const CVIndexMap& indexMap) {
+  pdb::DbiStreamBuilder& dbiBuilder = builder.getDbiBuilder();
+  DebugSHandler dsh(*this, *file, indexMap);
   // Now do all live .debug$S and .debug$F sections.
   for (SectionChunk *debugChunk : file->getDebugChunks()) {
     if (!debugChunk->live || debugChunk->getSize() == 0)
@@ -1207,7 +1233,7 @@ void PDBLinker::addObjFile(ObjFile *file, CVIndexMap *externIndexMap) {
 
     if (debugChunk->getSectionName() == ".debug$F") {
       ArrayRef<uint8_t> relocatedDebugContents =
-          relocateDebugChunk(alloc, *debugChunk);
+          relocateDebugChunk(symbol_alloc, *debugChunk);
 
       FixedStreamArray<object::FpoData> fpoRecords;
       BinaryStreamReader reader(relocatedDebugContents, support::little);
@@ -1275,6 +1301,24 @@ static PublicSym32 createPublic(Defined *def) {
   return pub;
 }
 
+template <class IterTy, class FuncTy>
+void real_for_each(IterTy Begin, IterTy End, FuncTy Fn) {
+  // TaskGroup has a relatively high overhead, so we want to reduce
+  // the number of spawn() calls. We'll create up to 1024 tasks here.
+  // (Note that 1024 is an arbitrary number. This code probably needs
+  // improving to take the number of available cores into account.)
+  //ptrdiff_t TaskSize = std::distance(Begin, End) / 128;
+  //if (TaskSize == 0)
+  ptrdiff_t TaskSize = 1;
+
+  llvm::parallel::detail::TaskGroup TG;
+  while (TaskSize < std::distance(Begin, End)) {
+    TG.spawn([=, &Fn] { std::for_each(Begin, Begin + TaskSize, Fn); });
+    Begin += TaskSize;
+  }
+  std::for_each(Begin, End, Fn);
+}
+
 // Add all object files to the PDB. Merge .debug$T sections into IpiData and
 // TpiData.
 void PDBLinker::addObjectsToPDB() {
@@ -1282,8 +1326,15 @@ void PDBLinker::addObjectsToPDB() {
 
   createModuleDBI(builder);
 
-  for (ObjFile *file : ObjFile::instances)
-    addObjFile(file);
+  real_for_each(ObjFile::instances.begin(), ObjFile::instances.end(), [&](ObjFile* file) {
+        CVIndexMap objectIndexMap;
+      auto x = addObjFile(file, objectIndexMap);
+      if (x != nullptr) {
+        std::lock_guard<std::mutex> lock(symbol_lock);
+        ScopedTimer t(symbolMergingTimer);
+        addObjFileSymbols(file, *x);
+      }
+    });
 
   builder.getStringTableBuilder().setStrings(pdbStrTab);
   t1.stop();
@@ -1575,18 +1626,18 @@ void PDBLinker::addImportFilesToPDB(ArrayRef<OutputSection *> outputSections) {
     ts.Offset = thunkChunk->getRVA() - thunkOS->getRVA();
 
     mod->addSymbol(codeview::SymbolSerializer::writeOneSymbol(
-        ons, alloc, CodeViewContainer::Pdb));
+        ons, symbol_alloc, CodeViewContainer::Pdb));
     mod->addSymbol(codeview::SymbolSerializer::writeOneSymbol(
-        cs, alloc, CodeViewContainer::Pdb));
+        cs, symbol_alloc, CodeViewContainer::Pdb));
 
     SmallVector<SymbolScope, 4> scopes;
     CVSymbol newSym = codeview::SymbolSerializer::writeOneSymbol(
-        ts, alloc, CodeViewContainer::Pdb);
+        ts, symbol_alloc, CodeViewContainer::Pdb);
     scopeStackOpen(scopes, mod->getNextSymbolOffset(), newSym);
 
     mod->addSymbol(newSym);
 
-    newSym = codeview::SymbolSerializer::writeOneSymbol(es, alloc,
+    newSym = codeview::SymbolSerializer::writeOneSymbol(es, symbol_alloc,
                                                         CodeViewContainer::Pdb);
     scopeStackClose(scopes, mod->getNextSymbolOffset(), file);
 

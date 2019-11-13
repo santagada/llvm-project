@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <mutex>
 
 namespace llvm {
 namespace codeview {
@@ -47,6 +48,7 @@ class GlobalTypeTableBuilder : public TypeCollection {
   SmallVector<GloballyHashedType, 2> SeenHashes;
 
 public:
+  static std::mutex locklock;
   explicit GlobalTypeTableBuilder(BumpPtrAllocator &Storage);
   ~GlobalTypeTableBuilder();
 
@@ -71,33 +73,40 @@ public:
   template <typename CreateFunc>
   TypeIndex insertRecordAs(GloballyHashedType Hash, size_t RecordSize,
                            CreateFunc Create) {
-    auto Result = HashedRecords.try_emplace(Hash, nextTypeIndex());
+    auto Iter = HashedRecords.find(Hash);
 
-    if (LLVM_UNLIKELY(Result.second /*inserted*/ ||
-                      Result.first->second.isSimple())) {
-      uint8_t *Stable = RecordStorage.Allocate<uint8_t>(RecordSize);
-      MutableArrayRef<uint8_t> Data(Stable, RecordSize);
-      ArrayRef<uint8_t> StableRecord = Create(Data);
-      if (StableRecord.empty()) {
-        // Records with forward references into the Type stream will be deferred
-        // for insertion at a later time, on the second pass.
-        Result.first->getSecond() = TypeIndex(SimpleTypeKind::NotTranslated);
-        return TypeIndex(SimpleTypeKind::NotTranslated);
+    if (LLVM_UNLIKELY(Iter == HashedRecords.end() /* should insert */ ||
+                      Iter->second.isSimple())) {
+      std::lock_guard<std::mutex> locked(locklock);
+      auto Result = HashedRecords.try_emplace(Hash, nextTypeIndex());
+      if (LLVM_UNLIKELY(Result.second /*inserted*/ ||
+        Result.first->second.isSimple())) {
+        uint8_t* Stable = RecordStorage.Allocate<uint8_t>(RecordSize);
+        MutableArrayRef<uint8_t> Data(Stable, RecordSize);
+        ArrayRef<uint8_t> StableRecord = Create(Data);
+        if (StableRecord.empty()) {
+          // Records with forward references into the Type stream will be deferred
+          // for insertion at a later time, on the second pass.
+          Result.first->getSecond() = TypeIndex(SimpleTypeKind::NotTranslated);
+          return TypeIndex(SimpleTypeKind::NotTranslated);
+        }
+        if (Result.first->second.isSimple()) {
+          assert(Result.first->second.getIndex() ==
+                (uint32_t)SimpleTypeKind::NotTranslated);
+          // On the second pass, update with index to remapped record. The
+          // (initially misbehaved) record will now come *after* other records
+          // resolved in the first pass, with proper *back* references in the
+          // stream.
+          Result.first->second = nextTypeIndex();
+        }
+        SeenRecords.push_back(StableRecord);
+        SeenHashes.push_back(Hash);
       }
-      if (Result.first->second.isSimple()) {
-        assert(Result.first->second.getIndex() ==
-               (uint32_t)SimpleTypeKind::NotTranslated);
-        // On the second pass, update with index to remapped record. The
-        // (initially misbehaved) record will now come *after* other records
-        // resolved in the first pass, with proper *back* references in the
-        // stream.
-        Result.first->second = nextTypeIndex();
-      }
-      SeenRecords.push_back(StableRecord);
-      SeenHashes.push_back(Hash);
+
+      return Result.first->second;
     }
 
-    return Result.first->second;
+    return Iter->second;
   }
 
   TypeIndex insertRecordBytes(ArrayRef<uint8_t> Data);

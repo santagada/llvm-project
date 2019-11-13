@@ -33,8 +33,12 @@ TypeIndex GlobalTypeTableBuilder::nextTypeIndex() const {
 
 GlobalTypeTableBuilder::GlobalTypeTableBuilder(BumpPtrAllocator &Storage)
     : RecordStorage(Storage) {
-  SeenRecords.reserve(4096);
+  SeenRecords.reserve(8388608);
+  SeenHashes.reserve(8388608);
+  HashedRecords.reserve(8388608);
 }
+
+std::mutex GlobalTypeTableBuilder::locklock;
 
 GlobalTypeTableBuilder::~GlobalTypeTableBuilder() = default;
 
