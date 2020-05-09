@@ -103,6 +103,7 @@ add_llvm_component_library(LLVMSupport
   IntEqClasses.cpp
   IntervalMap.cpp
   ItaniumManglingCanonicalizer.cpp
+  Crc32.cpp
   JSON.cpp
   KnownBits.cpp
   LEB128.cpp
