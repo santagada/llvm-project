@@ -102,6 +102,7 @@ add_llvm_library(LLVMSupport
   IntervalMap.cpp
   ItaniumManglingCanonicalizer.cpp
   JamCRC.cpp
+  Crc32.cpp
   JSON.cpp
   KnownBits.cpp
   LEB128.cpp
