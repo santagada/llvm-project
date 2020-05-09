@@ -10,7 +10,7 @@
 
 #include "llvm/DebugInfo/CodeView/TypeDeserializer.h"
 #include "llvm/DebugInfo/PDB/Native/Hash.h"
-#include "llvm/Support/CRC.h"
+#include "llvm/Support/Crc32.h"
 
 using namespace llvm;
 using namespace llvm::codeview;
@@ -123,7 +123,11 @@ Expected<uint32_t> llvm::pdb::hashTypeRecord(const CVType &Rec) {
   }
 
   // Run CRC32 over the bytes. This corresponds to `hashBufv8`.
+<<<<<<< HEAD
   JamCRC JC(/*Init=*/0U);
   JC.update(Rec.data());
   return JC.getCRC();
+=======
+  return ~crc32_16bytes_prefetch(Rec.data().data(), Rec.data().size(), 0xFFFFFFFF);
+>>>>>>> 1b8ae52d137... Use faster crc32 implementation
 }
