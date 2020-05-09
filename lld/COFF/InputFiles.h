@@ -198,7 +198,10 @@ public:
   bool hotPatchable = false;
 
   // Whether the object was already merged into the final PDB.
-  bool mergedIntoPDB = false;
+  std::atomic<bool> mergedTypesPDB = { false };
+
+  // Whether the object was already merged into the final PDB.
+  std::atomic<bool> mergedSymbolsPDB = { false };
 
   // If the OBJ has a .debug$T stream, this tells how it will be handled.
   TpiSource *debugTypesObj = nullptr;

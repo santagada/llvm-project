@@ -24,7 +24,14 @@
 #include "llvm/Support/BinaryStreamWriter.h"
 #include "llvm/Support/CRC.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/xxhash.h"
+
+#define XXH_STATIC_LINKING_ONLY
+#define XXH_INLINE_ALL
+#include "llvm/DebugInfo/CodeView/xxHash.h"
+#include <thread>
+#include <atomic>
+#undef XXH_INLINE_ALL
+#undef XXH_STATIC_LINKING_ONLY 
 
 using namespace llvm;
 using namespace llvm::codeview;
@@ -332,8 +339,19 @@ Error PDBFileBuilder::commit(StringRef Filename, codeview::GUID *Guid) {
   // has been written.
   if (Info->hashPDBContentsToGUID()) {
     // Compute a hash of all sections of the output file.
-    uint64_t Digest =
-        xxHash64({Buffer.getBufferStart(), Buffer.getBufferEnd()});
+	  XXH64_state_t state;
+	  state.total_len = 0;
+	  state.mem64[0] = 0;
+	  state.mem64[1] = 0;
+	  state.mem64[2] = 0;
+	  state.mem64[3] = 0;
+	  state.memsize = 0;
+	  state.v1 = PRIME64_1 + PRIME64_2;
+	  state.v2 = PRIME64_2;
+	  state.v3 = 0;
+	  state.v4 = -PRIME64_1;
+	  XXH64_update(&state, Buffer.getBufferStart(), Buffer.getLength());
+    uint64_t Digest = XXH64_digest(&state);
 
     H->Age = 1;
 

@@ -41,6 +41,13 @@ void TpiStreamBuilder::setVersionHeader(PdbRaw_TpiVer Version) {
   VerHeader = Version;
 }
 
+
+void llvm::pdb::TpiStreamBuilder::reserve(size_t Newcapacity)
+{
+	TypeRecords.reserve(Newcapacity);
+	TypeHashes.reserve(Newcapacity);
+}
+
 void TpiStreamBuilder::addTypeRecord(ArrayRef<uint8_t> Record,
                                      Optional<uint32_t> Hash) {
   // If we just crossed an 8KB threshold, add a type index offset.
@@ -182,3 +189,4 @@ Error TpiStreamBuilder::commit(const msf::MSFLayout &Layout,
 
   return Error::success();
 }
+
