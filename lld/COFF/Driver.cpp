@@ -633,11 +633,11 @@ static DebugKind parseDebugKind(const opt::InputArgList &args) {
   if (!a)
     return DebugKind::None;
   if (a->getNumValues() == 0)
-    return DebugKind::Full;
+    return DebugKind::GHash;
 
   DebugKind debug = StringSwitch<DebugKind>(a->getValue())
                      .CaseLower("none", DebugKind::None)
-                     .CaseLower("full", DebugKind::Full)
+                     .CaseLower("full", DebugKind::GHash)
                      .CaseLower("fastlink", DebugKind::FastLink)
                      // LLD extensions
                      .CaseLower("ghash", DebugKind::GHash)
@@ -1912,6 +1912,7 @@ void LinkerDriver::link(ArrayRef<const char *> argsArr) {
   Timer::root().stop();
   if (config->showTiming)
     Timer::root().print();
+  std::quick_exit(0);
 }
 
 } // namespace coff
