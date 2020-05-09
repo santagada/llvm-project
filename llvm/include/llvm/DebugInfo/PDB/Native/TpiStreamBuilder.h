@@ -53,6 +53,7 @@ public:
   TpiStreamBuilder &operator=(const TpiStreamBuilder &) = delete;
 
   void setVersionHeader(PdbRaw_TpiVer Version);
+  void reserve(size_t Newcapacity);
   void addTypeRecord(ArrayRef<uint8_t> Type, Optional<uint32_t> Hash);
 
   Error finalizeMsfLayout();

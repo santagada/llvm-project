@@ -54,13 +54,14 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/JamCRC.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include "lld/Common/Threads.h"
+#include "llvm/Support/Crc32.h"
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <chrono>
 
 using namespace lld;
 using namespace lld::coff;
@@ -107,8 +108,8 @@ public:
     // as the first "valid" string in the string table, so we do the same in
     // order to maintain as much byte-for-byte compatibility as possible.
     pdbStrTab.insert("");
-  typeServerIndexMappings.reserve(4096);
-  precompTypeIndexMappings.reserve(20);
+    typeServerIndexMappings.reserve(4096);
+    precompTypeIndexMappings.reserve(20);
   }
 
   /// Emit the basic PDB structure: initial streams, headers, etc.
@@ -348,13 +349,21 @@ static void addTypeInfo(pdb::TpiStreamBuilder &tpiBuilder,
   tpiBuilder.setVersionHeader(pdb::PdbTpiV80);
 
   // Flatten the in memory type table and hash each type.
-  typeTable.ForEachRecord([&](TypeIndex ti, const CVType &type) {
-    auto hash = pdb::hashTypeRecord(type);
-    if (auto e = hash.takeError())
-      fatal("type hashing error");
-    tpiBuilder.addTypeRecord(type.RecordData, *hash);
-  });
+  std::vector<uint32_t> hashes;
+  hashes.resize(typeTable.size());
+
+  parallelForEachN(0, typeTable.size(), [&hashes, &typeTable](size_t i) {
+	  auto hash = pdb::hashTypeRecord(typeTable.getType(TypeIndex::fromArrayIndex(i)));
+	  if (auto e = hash.takeError())
+		  fatal("type hashing error");
+	  hashes[i] = *hash;
+    });
+  tpiBuilder.reserve(typeTable.size());
+  for (size_t i = 0; i < typeTable.size(); i++)
+	  tpiBuilder.addTypeRecord(typeTable.getType(TypeIndex::fromArrayIndex(i)).RecordData, hashes[i]);
 }
+
+static std::mutex hash_types[4];
 
 Expected<const CVIndexMap &>
 PDBLinker::mergeDebugT(ObjFile *file, CVIndexMap *objectIndexMap) {
@@ -988,11 +997,7 @@ static pdb::SectionContrib createSectionContrib(const Chunk *c, uint32_t modi) {
     sc.Characteristics = secChunk->header->Characteristics;
     sc.Imod = secChunk->file->moduleDBI->getModuleIndex();
     ArrayRef<uint8_t> contents = secChunk->getContents();
-    JamCRC crc(0);
-    ArrayRef<char> charContents = makeArrayRef(
-        reinterpret_cast<const char *>(contents.data()), contents.size());
-    crc.update(charContents);
-    sc.DataCrc = crc.getCRC();
+    sc.DataCrc = ~crc32_16bytes_prefetch(contents.data(), contents.size(), 0xFFFFFFFF);
   } else {
     sc.Characteristics = os ? os->header.Characteristics : 0;
     sc.Imod = modi;
@@ -1191,10 +1196,10 @@ void DebugSHandler::finish() {
 }
 
 
-const CVIndexMap* PDBLinker::addObjFile(ObjFile *file, CVIndexMap& externIndexMap) {
-  if (file->mergedIntoPDB)
+const CVIndexMap* PDBLinker::addObjFile(ObjFile *file, CVIndexMap &externIndexMap) {
+  bool expected = false;
+  if (!file->mergedTypesPDB.compare_exchange_strong(expected, true))
     return nullptr;
-  file->mergedIntoPDB = true;
 
   // Before we can process symbol substreams from .debug$S, we need to process
   // type information, file checksums, and the string table.  Add type info to
@@ -1219,6 +1224,9 @@ const CVIndexMap* PDBLinker::addObjFile(ObjFile *file, CVIndexMap& externIndexMa
 }
 
 void PDBLinker::addObjFileSymbols(ObjFile* file, const CVIndexMap& indexMap) {
+  bool expected = false;
+  if (!file->mergedSymbolsPDB.compare_exchange_strong(expected, true))
+    return;
   pdb::DbiStreamBuilder& dbiBuilder = builder.getDbiBuilder();
   DebugSHandler dsh(*this, *file, indexMap);
   // Now do all live .debug$S and .debug$F sections.
@@ -1301,24 +1309,6 @@ static PublicSym32 createPublic(Defined *def) {
   return pub;
 }
 
-template <class IterTy, class FuncTy>
-void real_for_each(IterTy Begin, IterTy End, FuncTy Fn) {
-  // TaskGroup has a relatively high overhead, so we want to reduce
-  // the number of spawn() calls. We'll create up to 1024 tasks here.
-  // (Note that 1024 is an arbitrary number. This code probably needs
-  // improving to take the number of available cores into account.)
-  //ptrdiff_t TaskSize = std::distance(Begin, End) / 128;
-  //if (TaskSize == 0)
-  ptrdiff_t TaskSize = 1;
-
-  llvm::parallel::detail::TaskGroup TG;
-  while (TaskSize < std::distance(Begin, End)) {
-    TG.spawn([=, &Fn] { std::for_each(Begin, Begin + TaskSize, Fn); });
-    Begin += TaskSize;
-  }
-  std::for_each(Begin, End, Fn);
-}
-
 // Add all object files to the PDB. Merge .debug$T sections into IpiData and
 // TpiData.
 void PDBLinker::addObjectsToPDB() {
@@ -1326,15 +1316,48 @@ void PDBLinker::addObjectsToPDB() {
 
   createModuleDBI(builder);
 
-  real_for_each(ObjFile::instances.begin(), ObjFile::instances.end(), [&](ObjFile* file) {
-        CVIndexMap objectIndexMap;
-      auto x = addObjFile(file, objectIndexMap);
-      if (x != nullptr) {
-        std::lock_guard<std::mutex> lock(symbol_lock);
-        ScopedTimer t(symbolMergingTimer);
-        addObjFileSymbols(file, *x);
+  int items_to_work = (int) ObjFile::instances.size();
+
+  const CVIndexMap* tombstone = (const CVIndexMap*) std::numeric_limits<std::size_t>::max();
+  std::vector<const CVIndexMap*> indexForTypes(items_to_work, tombstone);
+  std::vector<CVIndexMap> indexForTypesInput(items_to_work);
+  std::vector<bool> indexWorked(items_to_work, false);
+  std::atomic<int> currTypeIndex = {0};
+
+  size_t ThreadCount = 4;
+  for (size_t i = 0; i < ThreadCount; i++) {
+    std::thread([&currTypeIndex, &indexForTypesInput, &indexForTypes, this]() {
+      while (true) {
+        int i = currTypeIndex++;
+        if (i >= (int) ObjFile::instances.size())
+          break;
+        indexForTypes[i] = addObjFile(ObjFile::instances[i], indexForTypesInput[i]);
       }
-    });
+    }).detach();
+  }
+
+  bool did_work = false;
+  while (items_to_work != 0) {
+    for (int i = 0; i < (int) ObjFile::instances.size(); ++i) {
+      if (indexWorked[i] == false && indexForTypes[i] != tombstone) {
+        const CVIndexMap* indexMap = indexForTypes[i];
+        if (indexMap != nullptr)
+          addObjFileSymbols(ObjFile::instances[i], *indexMap);
+
+        indexWorked[i] = true;
+        items_to_work--;
+        did_work = true;
+      }
+    }
+
+    if (did_work) {
+//      warn("did work");
+      did_work = false;
+    } else {
+//      warn ("no work");
+//      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
 
   builder.getStringTableBuilder().setStrings(pdbStrTab);
   t1.stop();

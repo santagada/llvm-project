@@ -23,6 +23,7 @@
 #include "llvm/Support/xxhash.h"
 #include <algorithm>
 #include <vector>
+#include "../../lld/include/lld/Common/Threads.h"
 
 using namespace llvm;
 using namespace llvm::msf;
@@ -127,7 +128,7 @@ static bool gsiRecordLess(StringRef S1, StringRef S2) {
     return memcmp(S1.data(), S2.data(), LS) < 0;
 
   // Both strings are ascii, perform a case-insenstive comparison.
-  return S1.compare_lower(S2.data()) < 0;
+  return S1.compare_lower(S2) < 0;
 }
 
 void GSIHashStreamBuilder::finalizeBuckets(uint32_t RecordZeroOffset) {
@@ -152,6 +153,20 @@ void GSIHashStreamBuilder::finalizeBuckets(uint32_t RecordZeroOffset) {
   HashRecords.reserve(Records.size());
   for (ulittle32_t &Word : HashBitmap)
     Word = 0;
+
+  lld::parallelForEach(TmpBuckets, [](std::vector < std::pair<StringRef, PSHashRecord>>& Bucket) {
+	  // Sort each bucket by memcmp of the symbol's name.  It's important that
+	  // we use the same sorting algorithm as is used by the reference
+	  // implementation to ensure that the search for a record within a bucket
+	  // can properly early-out when it detects the record won't be found.  The
+	  // algorithm used here corredsponds to the function
+	  // caseInsensitiveComparePchPchCchCch in the reference implementation.
+	  llvm::sort(Bucket, [](const std::pair<StringRef, PSHashRecord>& Left,
+		  const std::pair<StringRef, PSHashRecord>& Right) {
+			  return gsiRecordLess(Left.first, Right.first);
+		  });
+	  });
+
   for (size_t BucketIdx = 0; BucketIdx < IPHR_HASH + 1; ++BucketIdx) {
     auto &Bucket = TmpBuckets[BucketIdx];
     if (Bucket.empty())
@@ -165,17 +180,6 @@ void GSIHashStreamBuilder::finalizeBuckets(uint32_t RecordZeroOffset) {
     ulittle32_t ChainStartOff =
         ulittle32_t(HashRecords.size() * SizeOfHROffsetCalc);
     HashBuckets.push_back(ChainStartOff);
-
-    // Sort each bucket by memcmp of the symbol's name.  It's important that
-    // we use the same sorting algorithm as is used by the reference
-    // implementation to ensure that the search for a record within a bucket
-    // can properly early-out when it detects the record won't be found.  The
-    // algorithm used here corredsponds to the function
-    // caseInsensitiveComparePchPchCchCch in the reference implementation.
-    llvm::sort(Bucket, [](const std::pair<StringRef, PSHashRecord> &Left,
-                          const std::pair<StringRef, PSHashRecord> &Right) {
-      return gsiRecordLess(Left.first, Right.first);
-    });
 
     for (const auto &Entry : Bucket)
       HashRecords.push_back(Entry.second);
