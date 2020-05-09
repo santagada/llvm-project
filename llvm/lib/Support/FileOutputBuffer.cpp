@@ -127,7 +127,7 @@ createInMemoryBuffer(StringRef Path, size_t Size, unsigned Mode) {
 static Expected<std::unique_ptr<FileOutputBuffer>>
 createOnDiskBuffer(StringRef Path, size_t Size, unsigned Mode) {
   Expected<fs::TempFile> FileOrErr =
-      fs::TempFile::create(Path + ".tmp%%%%%%%", Mode);
+      fs::TempFile::create(Path + ".%%%%%%%.tmp", Mode);
   if (!FileOrErr)
     return FileOrErr.takeError();
   fs::TempFile File = std::move(*FileOrErr);
