@@ -46,6 +46,9 @@ defm add_gnu_debuglink
     : Eq<"add-gnu-debuglink", "Add a .gnu_debuglink for <debug-file>">,
       MetaVarName<"debug-file">;
 
+def add_ghashes : Flag<["-", "--"], "add-ghashes">,
+                  HelpText<"Add .h global hashes">;
+
 defm rename_section
     : Eq<"rename-section",
          "Renames a section from old to new, optionally with specified flags. "

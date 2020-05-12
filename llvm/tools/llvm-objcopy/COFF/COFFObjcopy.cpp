@@ -19,6 +19,9 @@
 #include "llvm/Support/CRC.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/BinaryStreamWriter.h"
+#include "llvm/DebugInfo/CodeView/TypeHashing.h"
+
 #include <cassert>
 
 namespace llvm {
@@ -27,6 +30,7 @@ namespace coff {
 
 using namespace object;
 using namespace COFF;
+using namespace codeview;
 
 static bool isDebugSection(const Section &Sec) {
   return Sec.Name.startswith(".debug");
@@ -87,6 +91,34 @@ static void addGnuDebugLink(Object &Obj, StringRef DebugLinkFile) {
   addSection(Obj, ".gnu_debuglink", Contents,
              IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ |
                  IMAGE_SCN_MEM_DISCARDABLE);
+}
+
+static ArrayRef<uint8_t> consumeDebugMagic(ArrayRef<uint8_t> Data,
+                                           StringRef SecName) {
+  // First 4 bytes are section magic.
+  if (Data.size() < 4)
+    error(SecName + " too short");
+  if (support::endian::read32le(Data.data()) != COFF::DEBUG_SECTION_MAGIC)
+    error(SecName + " has an invalid magic");
+  return Data.slice(4);
+}
+
+const std::vector<GloballyHashedType> mergeDebugT(const Section *Sec) {
+  std::vector<GloballyHashedType> OwnedHashes;
+
+  ArrayRef<uint8_t> Data = Sec->getContents();
+  Data = consumeDebugMagic(Data, ".debug$T");
+  if (Data.empty())
+    return OwnedHashes;
+
+  BinaryByteStream Stream(Data, support::little);
+  CVTypeArray Types;
+  BinaryStreamReader Reader(Stream);
+  if (auto EC = Reader.readArray(Types, Reader.getLength()))
+    error("Reader::readArray failed: " + toString(std::move(EC)));
+
+  OwnedHashes = GloballyHashedType::hashTypes(Types);
+  return OwnedHashes;
 }
 
 ArrayRef<uint8_t> toDebugH(const std::vector<GloballyHashedType> hashes,
@@ -253,6 +285,9 @@ static Error handleArgs(const CopyConfig &Config, Object &Obj) {
 
   if (!Config.AddGnuDebugLink.empty())
     addGnuDebugLink(Obj, Config.AddGnuDebugLink);
+
+  if (Config.AddGHashes)
+    addGHashes(Obj);
 
   if (Config.AllowBrokenLinks || !Config.BuildIdLinkDir.empty() ||
       Config.BuildIdLinkInput || Config.BuildIdLinkOutput ||
