@@ -51,8 +51,8 @@
 #include "llvm/DebugInfo/PDB/PDB.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Object/CVDebugRecord.h"
+#include "llvm/Support/BuryPointer.h"
 #include "llvm/Support/BinaryByteStream.h"
-#include "llvm/Support/CRC.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/FormatAdapters.h"
@@ -1762,22 +1762,24 @@ void createPDB(SymbolTable *symtab,
                      ArrayRef<uint8_t> sectionTable,
                      llvm::codeview::DebugInfo *buildId) {
   ScopedTimer t1(totalPdbLinkTimer);
-  PDBLinker pdb(symtab);
+  std::unique_ptr<PDBLinker> pdb(new PDBLinker(symtab));
 
-  pdb.initialize(buildId);
-  pdb.addObjectsToPDB();
-  pdb.addImportFilesToPDB(outputSections);
-  pdb.addSections(outputSections, sectionTable);
-  pdb.addNatvisFiles();
+  pdb->initialize(buildId);
+  pdb->addObjectsToPDB();
+  pdb->addImportFilesToPDB(outputSections);
+  pdb->addSections(outputSections, sectionTable);
+  pdb->addNatvisFiles();
 
   ScopedTimer t2(diskCommitTimer);
   codeview::GUID guid;
-  pdb.commit(&guid);
+  pdb->commit(&guid);
   memcpy(&buildId->PDB70.Signature, &guid, 16);
 
   t2.stop();
   t1.stop();
-  pdb.printStats();
+  pdb->printStats();
+  llvm::BuryPointer(std::move(pdb));
+  llvm::BuryPointer(std::move(symtab));
 }
 
 void PDBLinker::initialize(llvm::codeview::DebugInfo *buildId) {
