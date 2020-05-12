@@ -21,6 +21,7 @@
 #include <memory>
 #include <set>
 #include <vector>
+#include <atomic>
 
 namespace llvm {
 struct DILineInfo;
