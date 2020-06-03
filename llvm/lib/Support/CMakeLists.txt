@@ -51,6 +51,12 @@ else()
   set(Z3_LINK_FILES "")
 endif()
 
+if(LLVM_ENABLE_RPMALLOC)
+  set(RPMALLOC_FILES rpmalloc/rpmalloc.c)
+else()
+  set(RPMALLOC_FILES "")
+endif()
+
 add_llvm_component_library(LLVMSupport
   AArch64TargetParser.cpp
   ABIBreak.cpp
@@ -163,6 +169,8 @@ add_llvm_component_library(LLVMSupport
   regstrlcpy.c
   xxhash.cpp
   Z3Solver.cpp
+
+  ${RPMALLOC_FILES}
 
 # System
   Atomic.cpp

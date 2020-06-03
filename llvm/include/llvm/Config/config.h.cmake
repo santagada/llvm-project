@@ -353,4 +353,7 @@
 /* Whether Timers signpost passes in Xcode Instruments */
 #cmakedefine01 LLVM_SUPPORT_XCODE_SIGNPOSTS
 
+/* When enabled, overrides the Windows CRT allocator with rpmalloc. */
+#cmakedefine01 LLVM_ENABLE_RPMALLOC
+
 #endif

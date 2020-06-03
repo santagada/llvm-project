@@ -538,6 +538,16 @@ option (LLVM_BUILD_EXTERNAL_COMPILER_RT
 option (LLVM_VERSION_PRINTER_SHOW_HOST_TARGET_INFO
   "Show target and host info when tools are invoked with --version." ON)
 
+option(LLVM_ENABLE_RPMALLOC "Replace the Windows CRT allocator with rpmalloc. Only works with /MT enabled." OFF)
+if(LLVM_ENABLE_RPMALLOC)
+  if (CMAKE_BUILD_TYPE AND NOT ${LLVM_USE_CRT_${uppercase_CMAKE_BUILD_TYPE}} MATCHES "^(MT|MTd)$")
+    message(FATAL_ERROR "LLVM_ENABLE_RPMALLOC only works with /MT or /MTd. Use LLVM_USE_CRT_${uppercase_CMAKE_BUILD_TYPE} to set the appropriate option.")
+  endif()
+  if (LLVM_USE_SANITIZER)
+    message(FATAL_ERROR "LLVM_ENABLE_RPMALLOC cannot be used along with LLVM_USE_SANITIZER!")
+  endif()
+endif()
+
 # You can configure which libraries from LLVM you want to include in the
 # shared library by setting LLVM_DYLIB_COMPONENTS to a semi-colon delimited
 # list of LLVM components. All component names handled by llvm-config are valid.

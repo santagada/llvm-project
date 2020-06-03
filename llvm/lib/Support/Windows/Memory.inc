@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Config/config.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Process.h"
@@ -194,3 +195,74 @@ void Memory::InvalidateInstructionCache(
 
 } // namespace sys
 } // namespace llvm
+
+#if defined(_MT) && !defined(_DLL) && !defined(_DEBUG) && LLVM_ENABLE_RPMALLOC
+
+#include "../rpmalloc/rpmalloc.h"
+
+// This function is registered as a TLS callback and will be called first before
+// anything else. Its purpose is to set-up the memory page size if the
+// environment variable LLVM_RPMALLOC_PAGESIZE is provided.
+static void NTAPI InitializeRPMalloc(PVOID DllHandle, DWORD dwReason, PVOID) {
+  if (dwReason == DLL_PROCESS_ATTACH) {
+    rpmalloc_config_t Config;
+    memset(&Config, 0, sizeof(rpmalloc_config_t));
+
+    char PageSizeStr[16];
+    // Use a Win32 API call because ::getenv uses the CRT, and at this point it
+    // isn't initialized yet
+    DWORD R = ::GetEnvironmentVariableA("LLVM_RPMALLOC_PAGESIZE", PageSizeStr,
+                                        sizeof(PageSizeStr));
+    if (R > 0) {
+      llvm::StringRef AsRef(PageSizeStr);
+      if (AsRef.startswith_lower("4k")) {
+        // RPMalloc already defaults to 4k pages
+      } else if (AsRef.startswith_lower("2M")) {
+        Config.page_size = 2 * 1024 * 1024;
+        Config.enable_huge_pages = 1;
+      } else if (AsRef.startswith_lower("1G")) {
+        Config.page_size = 1024 * 1024 * 1024;
+        Config.enable_huge_pages = 1;
+      }
+    }
+    rpmalloc_initialize_config(&Config);
+  } else if (dwReason == DLL_PROCESS_DETACH) {
+    rpmalloc_finalize();
+  }
+}
+
+// Ensure the symbols are not dropped by the linker
+#ifdef _WIN64
+// in %VCToolsInstallDir%\crt\src\vcruntime\tlssup.cpp
+#pragma comment(linker, "/INCLUDE:_tls_used")
+#pragma comment(linker, "/INCLUDE:InitRPMallocTLSCallback")
+#else
+#pragma comment(linker, "/INCLUDE:__tls_used")
+#pragma comment(linker, "/INCLUDE:_InitRPMallocTLSCallback")
+#endif
+
+// Add our callback to the CRT TLS callbacks list
+#ifdef _WIN64
+#pragma const_seg(".CRT$XLF")
+EXTERN_C const
+#else
+#pragma data_seg(".CRT$XLF")
+EXTERN_C
+#endif
+    PIMAGE_TLS_CALLBACK InitRPMallocTLSCallback = InitializeRPMalloc;
+#ifdef _WIN64
+#pragma const_seg()
+#else
+#pragma data_seg()
+#endif //_WIN64
+
+// Bypass CRT debug allocator
+#ifdef _DEBUG
+void *operator new(decltype(sizeof(0)) n) noexcept(false) { return malloc(n); }
+void __CRTDECL operator delete(void *const block) noexcept { free(block); }
+
+void *operator new[](std::size_t s) throw(std::bad_alloc) { return malloc(s); }
+void operator delete[](void *p) throw() { free(p); }
+#endif
+
+#endif // _MT && !_DLL && !_DEBUG && LLVM_ENABLE_RPMALLOC
