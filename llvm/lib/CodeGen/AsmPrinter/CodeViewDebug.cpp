@@ -699,10 +699,8 @@ void CodeViewDebug::emitTypeGlobalHashes() {
       OS.AddComment(Comment);
       ++TI;
     }
-    assert(GHR.Hash.size() == 8);
-    StringRef S(reinterpret_cast<const char *>(GHR.Hash.data()),
-                GHR.Hash.size());
-    OS.emitBinaryData(S);
+
+	OS.emitIntValue(GHR.Hash, 8);
   }
 }
 

@@ -13,9 +13,11 @@
 #include "Reader.h"
 #include "Writer.h"
 
+#include "llvm/DebugInfo/CodeView/TypeHashing.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/COFF.h"
 #include "llvm/Support/CRC.h"
+#include "llvm/Support/BinaryStreamWriter.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/Path.h"
 #include <cassert>
@@ -26,6 +28,7 @@ namespace coff {
 
 using namespace object;
 using namespace COFF;
+using namespace codeview;
 
 static bool isDebugSection(const Section &Sec) {
   return Sec.Name.startswith(".debug");
@@ -94,6 +97,7 @@ static Error addGnuDebugLink(Object &Obj, StringRef DebugLinkFile) {
   return Error::success();
 }
 
+
 static void setSectionFlags(Section &Sec, SectionFlag AllFlags) {
   // Need to preserve alignment flags.
   const uint32_t PreserveMask =
@@ -129,6 +133,91 @@ static void setSectionFlags(Section &Sec, SectionFlag AllFlags) {
     NewCharacteristics |= IMAGE_SCN_LNK_REMOVE;
 
   Sec.Header.Characteristics = NewCharacteristics;
+}
+
+static ArrayRef<uint8_t> consumeDebugMagic(ArrayRef<uint8_t> Data,
+                                           StringRef SecName) {
+  // First 4 bytes are section magic.
+  if (Data.size() < 4)
+    error(SecName + " too short");
+  if (support::endian::read32le(Data.data()) != COFF::DEBUG_SECTION_MAGIC)
+    error(SecName + " has an invalid magic");
+  return Data.slice(4);
+}
+
+const std::vector<GloballyHashedType> mergeDebugT(const Section *Sec) {
+  std::vector<GloballyHashedType> OwnedHashes;
+
+  ArrayRef<uint8_t> Data = Sec->getContents();
+  Data = consumeDebugMagic(Data, ".debug$T");
+  if (Data.empty())
+    return OwnedHashes;
+
+  BinaryByteStream Stream(Data, support::little);
+  CVTypeArray Types;
+  BinaryStreamReader Reader(Stream);
+  if (auto EC = Reader.readArray(Types, Reader.getLength()))
+    error("Reader::readArray failed: " + toString(std::move(EC)));
+
+  OwnedHashes = GloballyHashedType::hashTypes(Types);
+  return OwnedHashes;
+}
+
+ArrayRef<uint8_t> toDebugH(const std::vector<GloballyHashedType> hashes,
+                           BumpPtrAllocator &Alloc) {
+  uint32_t Size = 8 + 8 * hashes.size();
+  uint8_t *Data = Alloc.Allocate<uint8_t>(Size);
+  MutableArrayRef<uint8_t> Buffer(Data, Size);
+  BinaryStreamWriter Writer(Buffer, llvm::support::little);
+  uint32_t magic = COFF::DEBUG_HASHES_SECTION_MAGIC;
+  cantFail(Writer.writeInteger(magic));
+  cantFail(Writer.writeInteger(uint16_t(0)));
+  cantFail(Writer.writeInteger(uint16_t(GlobalTypeHashAlg::SHA1_8)));
+  for (const auto &H : hashes) {
+    cantFail(Writer.writeInteger(H.Hash));
+  }
+  assert(Writer.bytesRemaining() == 0);
+  return Buffer;
+}
+
+static void addGHashes(Object &Obj) {
+  std::vector<GloballyHashedType> hashes;
+
+  bool found_types = false;
+
+  for (Section section: Obj.getSections()) {
+    if (section.Name == ".debug$H")
+      error("Already has .debug$H");
+
+    if (section.Name == ".debug$T") {
+      hashes = mergeDebugT(&section);
+	  found_types = true;
+      break;
+    }
+  }
+
+  if (!found_types)
+	  return;
+
+  std::vector<Section> Sections;
+  Section Sec;
+  BumpPtrAllocator Allocator;
+  Sec.setOwnedContents(toDebugH(hashes, Allocator));
+  Sec.Name = ".debug$H";
+  Sec.Header.VirtualSize = 0;
+  Sec.Header.VirtualAddress = 0;
+  Sec.Header.SizeOfRawData = Sec.getContents().size();
+  // Sec.Header.PointerToRawData is filled in by the writer.
+  Sec.Header.PointerToRelocations = 0;
+  Sec.Header.PointerToLinenumbers = 0;
+  // Sec.Header.NumberOfRelocations is filled in by the writer.
+  Sec.Header.NumberOfLinenumbers = 0;
+  Sec.Header.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA |
+                               IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_DISCARDABLE | IMAGE_SCN_ALIGN_4BYTES;
+  std::vector<Symbol> Symbols;
+
+  Sections.push_back(Sec);
+  Obj.addSections(Sections);
 }
 
 static Error handleArgs(const CopyConfig &Config, Object &Obj) {
@@ -248,6 +337,9 @@ static Error handleArgs(const CopyConfig &Config, Object &Obj) {
   if (!Config.AddGnuDebugLink.empty())
     if (Error E = addGnuDebugLink(Obj, Config.AddGnuDebugLink))
       return E;
+
+  if (Config.AddGHashes)
+    addGHashes(Obj);
 
   if (Config.AllowBrokenLinks || !Config.BuildIdLinkDir.empty() ||
       Config.BuildIdLinkInput || Config.BuildIdLinkOutput ||

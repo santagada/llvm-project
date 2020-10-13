@@ -607,6 +607,7 @@ parseObjcopyOptions(ArrayRef<const char *> ArgsArr,
     Config.GnuDebugLinkCRC32 =
         llvm::crc32(arrayRefFromStringRef(Debug->getBuffer()));
   }
+  Config.AddGHashes = InputArgs.hasArg(OBJCOPY_add_ghashes);
   Config.BuildIdLinkDir = InputArgs.getLastArgValue(OBJCOPY_build_id_link_dir);
   if (InputArgs.hasArg(OBJCOPY_build_id_link_input))
     Config.BuildIdLinkInput =
