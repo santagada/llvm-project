@@ -135,32 +135,48 @@ static void setSectionFlags(Section &Sec, SectionFlag AllFlags) {
   Sec.Header.Characteristics = NewCharacteristics;
 }
 
-static ArrayRef<uint8_t> consumeDebugMagic(ArrayRef<uint8_t> Data,
-                                           StringRef SecName) {
+Expected<ArrayRef<uint8_t>> consumeDebugMagic(ArrayRef<uint8_t> data,
+                                                  StringRef sectionName) {
+  if (data.empty())
+    return ArrayRef<uint8_t>{};
+
   // First 4 bytes are section magic.
-  if (Data.size() < 4)
-    error(SecName + " too short");
-  if (support::endian::read32le(Data.data()) != COFF::DEBUG_SECTION_MAGIC)
-    error(SecName + " has an invalid magic");
-  return Data.slice(4);
+  if (data.size() < 4)
+    return createStringError(
+            llvm::errc::invalid_argument, "the section is too short: " + sectionName);
+
+  if (!sectionName.startswith(".debug$"))
+    return createStringError(
+            llvm::errc::invalid_argument, "invalid section: " + sectionName);
+
+  uint32_t magic = support::endian::read32le(data.data());
+  uint32_t expectedMagic = sectionName == ".debug$H"
+                               ? DEBUG_HASHES_SECTION_MAGIC
+                               : DEBUG_SECTION_MAGIC;
+  if (magic != expectedMagic) {
+    return createStringError(
+          llvm::errc::invalid_argument, "ignoring section " + sectionName + " with unrecognized magic 0x" + utohexstr(magic));
+  }
+  return data.slice(4);
 }
 
-const std::vector<GloballyHashedType> mergeDebugT(const Section *Sec) {
-  std::vector<GloballyHashedType> OwnedHashes;
+Error mergeDebugT(const Section *Sec, std::vector<GloballyHashedType> &OwnedHashes) {
 
   ArrayRef<uint8_t> Data = Sec->getContents();
-  Data = consumeDebugMagic(Data, ".debug$T");
-  if (Data.empty())
-    return OwnedHashes;
+  auto maybe = consumeDebugMagic(Data, ".debug$S");
+  if (!maybe)
+    return maybe.takeError();
+  Data = *maybe;
 
   BinaryByteStream Stream(Data, support::little);
   CVTypeArray Types;
   BinaryStreamReader Reader(Stream);
   if (auto EC = Reader.readArray(Types, Reader.getLength()))
-    error("Reader::readArray failed: " + toString(std::move(EC)));
+    return createStringError(
+            llvm::errc::invalid_argument, "Reader::readArray failed: " + toString(std::move(EC)));
 
   OwnedHashes = GloballyHashedType::hashTypes(Types);
-  return OwnedHashes;
+  return Error::success();
 }
 
 ArrayRef<uint8_t> toDebugH(const std::vector<GloballyHashedType> hashes,
@@ -180,24 +196,27 @@ ArrayRef<uint8_t> toDebugH(const std::vector<GloballyHashedType> hashes,
   return Buffer;
 }
 
-static void addGHashes(Object &Obj) {
+static Error addGHashes(Object &Obj) {
   std::vector<GloballyHashedType> hashes;
 
   bool found_types = false;
 
   for (Section section: Obj.getSections()) {
     if (section.Name == ".debug$H")
-      error("Already has .debug$H");
+      return createStringError(
+            llvm::errc::invalid_argument, "Already has .debug$H");
 
     if (section.Name == ".debug$T") {
-      hashes = mergeDebugT(&section);
-	  found_types = true;
+      Error E = mergeDebugT(&section, hashes);
+      if (E)
+        return E;
+	    found_types = true;
       break;
     }
   }
 
   if (!found_types)
-	  return;
+	  return Error::success();
 
   std::vector<Section> Sections;
   Section Sec;
@@ -218,6 +237,8 @@ static void addGHashes(Object &Obj) {
 
   Sections.push_back(Sec);
   Obj.addSections(Sections);
+
+  return Error::success();
 }
 
 static Error handleArgs(const CopyConfig &Config, Object &Obj) {
@@ -339,7 +360,8 @@ static Error handleArgs(const CopyConfig &Config, Object &Obj) {
       return E;
 
   if (Config.AddGHashes)
-    addGHashes(Obj);
+    if (Error E = addGHashes(Obj))
+      return E;
 
   if (Config.AllowBrokenLinks || !Config.BuildIdLinkDir.empty() ||
       Config.BuildIdLinkInput || Config.BuildIdLinkOutput ||
